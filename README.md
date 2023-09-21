@@ -1,2 +1,2 @@
 # ViHGNN
-Official Code for ViHGNN
+Code for ViHGNN
