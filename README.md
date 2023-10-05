@@ -4,8 +4,8 @@
 
 Yan Han, Peihao Wang, Souvik Kundu, Ying Ding, Zhangyang Wang.
 
-![image](assets/img/ViHGNN_teaser.pdf)
+![image](assets/img/ViHGNN_teaser)
 
-![image](assets/img/ViHGCNN_HNN_Arch.pdf)
+![image](assets/img/ViHGCNN_HNN_Arch)
 
-![image](assets/img/ViHGCNN_Pipeline.pdf)
+![image](assets/img/ViHGCNN_Pipeline)
