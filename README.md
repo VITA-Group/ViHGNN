@@ -4,8 +4,8 @@
 
 Yan Han, Peihao Wang, Souvik Kundu, Ying Ding, Zhangyang Wang.
 
-![image](https://github.com/VITA-Group/ViHGNN/assets/img/ViHGNN_teaser.pdf)
+![Alt text](assets/img/ViHGNN_teaser.pdf)
 
-![image](https://github.com/VITA-Group/ViHGNN/assets/img/ViHGCNN_HNN_Arch.pdf)
+![Alt text](assets/img/ViHGCNN_HNN_Arch.pdf)
 
-![image](https://github.com/VITA-Group/ViHGNN/assets/img/ViHGCNN_Pipeline.pdf)
+![Alt text](ViHGNN/assets/img/ViHGCNN_Pipeline.pdf)
