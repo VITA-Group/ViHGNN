@@ -90,6 +90,9 @@ def batched_index_select(x, idx):
         Tensor: output neighbors features
             :math:`\mathbf{X} \in \mathbb{R}^{B \times C \times N \times k}`.
     """
+    # Replace -1s in idx with the index pointing to the dummy node/hyperedge
+    idx[idx == -1] = x.size(2) - 1  # Make sure this points to the last node/hyperedge which is the dummy one
+
     batch_size, num_dims, num_vertices_reduced = x.shape[:3]
     _, num_vertices, k = idx.shape
     idx_base = torch.arange(0, batch_size, device=idx.device).view(-1, 1, 1) * num_vertices_reduced

@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 from .torch_nn import BasicConv, batched_index_select, act_layer
-from .torch_edge import DenseDilatedKnnGraph
+from .torch_edge import DenseDilatedKnnGraph, construct_hyperedges
 from .pos_embed import get_2d_relative_pos_embed
 import torch.nn.functional as F
 from timm.models.layers import DropPath
@@ -85,6 +85,48 @@ class GINConv2d(nn.Module):
         return self.nn((1 + self.eps) * x + x_j)
 
 
+class HypergraphConv2d(nn.Module):
+    """
+    Hypergraph Convolution based on the GIN mechanism
+    """
+    def __init__(self, in_channels, out_channels, act='relu', norm=None, bias=True):
+        super(HypergraphConv2d, self).__init__()
+        # Node to hyperedge transformation
+        self.nn_node_to_hyperedge = BasicConv([in_channels, out_channels], act, norm, bias)
+        # Hyperedge to node transformation
+        self.nn_hyperedge_to_node = BasicConv([out_channels, out_channels], act, norm, bias)
+        eps_init = 0.0
+        self.eps = nn.Parameter(torch.Tensor([eps_init]))
+
+    def forward(self, x, hyperedge_matrix, point_hyperedge_index, centers):
+        with torch.no_grad():
+            # Check and append dummy node to x if not present
+            if not torch.equal(x[:, :, -1, :], torch.zeros((x.size(0), x.size(1), 1, x.size(3)), device=x.device)):
+                dummy_node = torch.zeros((x.size(0), x.size(1), 1, x.size(3)), device=x.device)
+                x = torch.cat([x, dummy_node], dim=2)
+            
+            # Check and append dummy hyperedge to centers if not present
+            if not torch.equal(centers[:, :, -1], torch.zeros((centers.size(0), centers.size(1), 1), device=centers.device)):
+                dummy_hyperedge = torch.zeros((centers.size(0), centers.size(1), 1), device=centers.device)
+                centers = torch.cat([centers, dummy_hyperedge], dim=2)
+
+        # Step 1: Aggregate node features to get hyperedge features
+        node_features_for_hyperedges = batched_index_select(x, hyperedge_matrix)
+        aggregated_hyperedge_features, _ = node_features_for_hyperedges.sum(dim=-1, keepdim=True)
+        aggregated_hyperedge_features = self.nn_node_to_hyperedge(aggregated_hyperedge_features.squeeze(-1))
+        # Adding the hyperedge center features to the aggregated hyperedge features
+        aggregated_hyperedge_features += centers
+        
+        # Step 2: Aggregate hyperedge features to update node features
+        hyperedge_features_for_nodes = batched_index_select(aggregated_hyperedge_features.unsqueeze(-1), point_hyperedge_index)
+        aggregated_node_features_from_hyperedges = self.nn_hyperedge_to_node(hyperedge_features_for_nodes.sum(dim=-1, keepdim=True).squeeze(-1))
+
+        # Update original node features using GIN mechanism
+        out = (1 + self.eps) * x + aggregated_node_features_from_hyperedges
+
+        return out
+
+
 class GraphConv2d(nn.Module):
     """
     Static graph convolution layer
@@ -99,11 +141,16 @@ class GraphConv2d(nn.Module):
             self.gconv = GraphSAGE(in_channels, out_channels, act, norm, bias)
         elif conv == 'gin':
             self.gconv = GINConv2d(in_channels, out_channels, act, norm, bias)
+        elif conv == 'hypergraph':
+            self.gconv = HypergraphConv2d(in_channels, out_channels, act, norm, bias)
         else:
             raise NotImplementedError('conv:{} is not supported'.format(conv))
 
-    def forward(self, x, edge_index, y=None):
-        return self.gconv(x, edge_index, y)
+    def forward(self, x, edge_index, y=None, hyperedge_matrix=None, point_hyperedge_index=None, centers=None):
+        if isinstance(self.gconv, HypergraphConv2d):
+            return self.gconv(x, edge_index, y, hyperedge_matrix=hyperedge_matrix, point_hyperedge_index=point_hyperedge_index, centers=centers)
+        else:
+            return self.gconv(x, edge_index, y)
 
 
 class DyGraphConv2d(GraphConv2d):
@@ -116,7 +163,12 @@ class DyGraphConv2d(GraphConv2d):
         self.k = kernel_size
         self.d = dilation
         self.r = r
-        self.dilated_knn_graph = DenseDilatedKnnGraph(kernel_size, dilation, stochastic, epsilon)
+        # Choose between dilated knn graph and hypergraph
+        if conv == 'hypergraph':
+            self.use_hypergraph = True
+        else:
+            self.use_hypergraph = False
+            self.graph_constructor = DenseDilatedKnnGraph(kernel_size, dilation, stochastic, epsilon)
 
     def forward(self, x, relative_pos=None):
         B, C, H, W = x.shape
@@ -125,8 +177,15 @@ class DyGraphConv2d(GraphConv2d):
             y = F.avg_pool2d(x, self.r, self.r)
             y = y.reshape(B, C, -1, 1).contiguous()            
         x = x.reshape(B, C, -1, 1).contiguous()
-        edge_index = self.dilated_knn_graph(x, y, relative_pos)
-        x = super(DyGraphConv2d, self).forward(x, edge_index, y)
+        
+        # Construct graph using either hypergraph or dilated knn graph based on use_hypergraph flag
+        if self.use_hypergraph:
+            hyperedge_matrix, point_hyperedge_index, centers = hypergraph_construction(x, num_clusters=self.k)
+            x = super(DyGraphConv2d, self).forward(x, hyperedge_matrix=hyperedge_matrix, point_hyperedge_index=point_hyperedge_index, centers=centers, y=y)
+        else:
+            edge_index = self.graph_constructor(x, y, relative_pos)
+            x = super(DyGraphConv2d, self).forward(x, edge_index, y=y)
+        
         return x.reshape(B, -1, H, W).contiguous()
 
 
