@@ -268,7 +268,7 @@ def vig_b_224_gelu(pretrained=False, **kwargs):
 
 
 @register_model
-def vig_b_224_gelu(pretrained=False, **kwargs):
+def vihg_b_224_gelu(pretrained=False, **kwargs):
     class OptInit:
         def __init__(self, num_classes=1000, drop_path_rate=0.0, drop_rate=0.0, num_clusters=25, **kwargs):
             self.k = num_clusters # hyperedges num (default:25)
