@@ -118,7 +118,16 @@ class DeepGCN(torch.nn.Module):
         channels = opt.channels
         reduce_ratios = [4, 2, 1, 1]
         dpr = [x.item() for x in torch.linspace(0, drop_path, self.n_blocks)]  # stochastic depth decay rule 
-        num_knn = [int(x.item()) for x in torch.linspace(k, k, self.n_blocks)]  # number of knn's k
+        if conv == 'hypergraph':
+            # Use num_clusters for hypergraph construction
+            num_clusters = [int(x.item()) for x in torch.linspace(k, k, self.n_blocks)]  # number of hyperedges k
+            print('num_clusters', num_clusters)
+            graph_params = num_clusters
+        else:
+            # Use num_knn for knn graph construction
+            num_knn = [int(x.item()) for x in torch.linspace(k, k, self.n_blocks)] # number of knn's k
+            print('num_knn', num_knn)
+            graph_params = num_knn
         max_dilation = 49 // max(num_knn)
         
         self.stem = Stem(out_dim=channels[0], act=act)
@@ -133,7 +142,7 @@ class DeepGCN(torch.nn.Module):
                 HW = HW // 4
             for j in range(blocks[i]):
                 self.backbone += [
-                    Seq(Grapher(channels[i], num_knn[idx], min(idx // 4 + 1, max_dilation), conv, act, norm,
+                    Seq(Grapher(channels[i], graph_params[idx], min(idx // 4 + 1, max_dilation), conv, act, norm,
                                     bias, stochastic, epsilon, reduce_ratios[i], n=HW, drop_path=dpr[idx],
                                     relative_pos=True),
                           FFN(channels[i], channels[i] * 4, act=act, drop_path=dpr[idx])

@@ -103,19 +103,29 @@ class DeepGCN(torch.nn.Module):
 
         dpr = [x.item() for x in torch.linspace(0, drop_path, self.n_blocks)]  # stochastic depth decay rule 
         print('dpr', dpr)
-        num_knn = [int(x.item()) for x in torch.linspace(k, 2*k, self.n_blocks)]  # number of knn's k
-        print('num_knn', num_knn)
+
+        if conv == 'hypergraph':
+            # Use num_clusters for hypergraph construction
+            num_clusters = [int(x.item()) for x in torch.linspace(k, 2*k, self.n_blocks)]  # number of hyperedges k
+            print('num_clusters', num_clusters)
+            graph_params = num_clusters
+        else:
+            # Use num_knn for knn graph construction
+            num_knn = [int(x.item()) for x in torch.linspace(k, 2*k, self.n_blocks)] # number of knn's k
+            print('num_knn', num_knn)
+            graph_params = num_knn
+
         max_dilation = 196 // max(num_knn)
         
         self.pos_embed = nn.Parameter(torch.zeros(1, channels, 14, 14))
 
         if opt.use_dilation:
-            self.backbone = Seq(*[Seq(Grapher(channels, num_knn[i], min(i // 4 + 1, max_dilation), conv, act, norm,
+            self.backbone = Seq(*[Seq(Grapher(channels, graph_params[i], min(i // 4 + 1, max_dilation), conv, act, norm,
                                                 bias, stochastic, epsilon, 1, drop_path=dpr[i]),
                                       FFN(channels, channels * 4, act=act, drop_path=dpr[i])
                                      ) for i in range(self.n_blocks)])
         else:
-            self.backbone = Seq(*[Seq(Grapher(channels, num_knn[i], 1, conv, act, norm,
+            self.backbone = Seq(*[Seq(Grapher(channels, graph_params[i], 1, conv, act, norm,
                                                 bias, stochastic, epsilon, 1, drop_path=dpr[i]),
                                       FFN(channels, channels * 4, act=act, drop_path=dpr[i])
                                      ) for i in range(self.n_blocks)])
