@@ -25,7 +25,9 @@ python -m torch.distributed.launch --nproc_per_node=8 train.py /path/to/imagenet
 
 ## Evaluation
 - Evaluate example:
+```
 python train.py /path/to/imagenet/ --model pvihg_ti_224_gelu -b 128 --pretrain_path /path/to/pretrained/model/ --evaluate
+```
 
 ## Citation
 ```
