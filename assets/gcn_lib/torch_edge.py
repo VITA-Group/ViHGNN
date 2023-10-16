@@ -225,20 +225,12 @@ def construct_hyperedges(x, num_clusters, threshold=0.5, m=2):
         
         batch_size, num_dims, num_points, _ = x.shape
         
-        # # Append a dummy feature of zeros to x
-        # dummy_feature = torch.zeros(batch_size, num_dims, 1, 1)
-        # x = torch.cat([x, dummy_feature], dim=2)
-        
         # Get centers and memberships using the fuzzy c-means clustering
         centers, memberships = fuzzy_c_means(x, num_clusters, m)
         
-        # # Append a dummy feature of zeros to centers
-        # dummy_center = torch.zeros(batch_size, num_dims, 1)
-        # centers = torch.cat([centers, dummy_center], dim=2)
-        
         # Create hyperedge matrix to represent each hyperedge's points
         # Initialized with -1s for padding
-        hyperedge_matrix = -torch.ones(batch_size, num_clusters, num_points + 1, dtype=torch.long) # +1 for dummy node
+        hyperedge_matrix = -torch.ones(batch_size, num_clusters, num_points, dtype=torch.long)
         for b in range(batch_size):
             for c in range(num_clusters):
                 idxs = torch.where(memberships[b, :, c] > threshold)[0]
@@ -247,7 +239,7 @@ def construct_hyperedges(x, num_clusters, threshold=0.5, m=2):
         # Create point to hyperedge index to indicate which hyperedges each point belongs to
         # Initialized with -1s for padding
         max_edges_per_point = (memberships > threshold).sum(dim=-1).max().item()
-        point_hyperedge_index = -torch.ones(batch_size, num_points + 1, max_edges_per_point, dtype=torch.long) # +1 for dummy node
+        point_hyperedge_index = -torch.ones(batch_size, num_points, max_edges_per_point, dtype=torch.long)
         for b in range(batch_size):
             for p in range(num_points):
                 idxs = torch.where(memberships[b, p, :] > threshold)[0]
