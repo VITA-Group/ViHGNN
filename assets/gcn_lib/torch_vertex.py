@@ -92,37 +92,37 @@ class HypergraphConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, act='relu', norm=None, bias=True):
         super(HypergraphConv2d, self).__init__()
         # Node to hyperedge transformation
-        self.nn_node_to_hyperedge = BasicConv([in_channels, out_channels], act, norm, bias)
+        self.nn_node_to_hyperedge = BasicConv([in_channels, in_channels], act, norm, bias) # in_channels = 128, out_channels = 256
         # Hyperedge to node transformation
-        self.nn_hyperedge_to_node = BasicConv([out_channels, out_channels], act, norm, bias)
+        self.nn_hyperedge_to_node = BasicConv([in_channels, out_channels], act, norm, bias)
         eps_init = 0.0
         self.eps = nn.Parameter(torch.Tensor([eps_init]))
 
     def forward(self, x, hyperedge_matrix, point_hyperedge_index, centers):
         with torch.no_grad():
             # Check and append dummy node to x if not present
-            if not torch.equal(x[:, :, -1, :], torch.zeros((x.size(0), x.size(1), 1, x.size(3)), device=x.device)):
+            if not torch.equal(x[:, :, -1, :], torch.zeros((x.size(0), x.size(1), 1, x.size(3)), device=x.device)): # 假设 n_dims = 128, n_points = 3136, hyperedge_num = 50
                 dummy_node = torch.zeros((x.size(0), x.size(1), 1, x.size(3)), device=x.device)
-                x = torch.cat([x, dummy_node], dim=2)
+                x = torch.cat([x, dummy_node], dim=2) # (1, 128, 3137, 1)
             
             # Check and append dummy hyperedge to centers if not present
             if not torch.equal(centers[:, :, -1], torch.zeros((centers.size(0), centers.size(1), 1), device=centers.device)):
                 dummy_hyperedge = torch.zeros((centers.size(0), centers.size(1), 1), device=centers.device)
-                centers = torch.cat([centers, dummy_hyperedge], dim=2)
+                centers = torch.cat([centers, dummy_hyperedge], dim=2) # centers: (1, 128, 51)
 
         # Step 1: Aggregate node features to get hyperedge features
         node_features_for_hyperedges = batched_index_select(x, hyperedge_matrix)
         aggregated_hyperedge_features, _ = node_features_for_hyperedges.sum(dim=-1, keepdim=True)
-        aggregated_hyperedge_features = self.nn_node_to_hyperedge(aggregated_hyperedge_features.squeeze(-1))
+        aggregated_hyperedge_features = self.nn_node_to_hyperedge(aggregated_hyperedge_features.squeeze(-1)) # (1, 128, 50)
         # Adding the hyperedge center features to the aggregated hyperedge features
-        aggregated_hyperedge_features += centers
+        aggregated_hyperedge_features += (1 + self.eps) * centers[:, :, :-1, :]
         
         # Step 2: Aggregate hyperedge features to update node features
         hyperedge_features_for_nodes = batched_index_select(aggregated_hyperedge_features.unsqueeze(-1), point_hyperedge_index)
         aggregated_node_features_from_hyperedges = self.nn_hyperedge_to_node(hyperedge_features_for_nodes.sum(dim=-1, keepdim=True).squeeze(-1))
 
-        # Update original node features using GIN mechanism
-        out = (1 + self.eps) * x + aggregated_node_features_from_hyperedges
+        # Update original node features
+        out = aggregated_node_features_from_hyperedges
 
         return out
 
@@ -180,7 +180,7 @@ class DyGraphConv2d(GraphConv2d):
         
         # Construct graph using either hypergraph or dilated knn graph based on use_hypergraph flag
         if self.use_hypergraph:
-            hyperedge_matrix, point_hyperedge_index, centers = hypergraph_construction(x, num_clusters=self.k)
+            hyperedge_matrix, point_hyperedge_index, centers = construct_hyperedges(x, num_clusters=self.k)
             x = super(DyGraphConv2d, self).forward(x, hyperedge_matrix=hyperedge_matrix, point_hyperedge_index=point_hyperedge_index, centers=centers, y=y)
         else:
             edge_index = self.graph_constructor(x, y, relative_pos)

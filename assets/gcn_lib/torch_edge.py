@@ -159,7 +159,26 @@ class DenseDilatedKnnGraph(nn.Module):
         return self._dilated(edge_index)
 
 
-def fuzzy_c_means(x, n_clusters, m=2, epsilon=1e-6, max_iter=100):
+def initialize_memberships(batch_size, n_points, n_clusters, device):
+    """
+    Initialize the membership matrix for Fuzzy C-Means clustering.
+
+    Args:
+        batch_size: int
+        n_points: int
+        n_clusters: int
+        device: torch.device
+
+    Returns:
+        memberships: tensor (batch_size, n_points, n_clusters)
+    """
+    # Randomly initialize the membership matrix ensuring that the sum over clusters for each point is 1
+    memberships = torch.rand(batch_size, n_points, n_clusters, device=device)
+    memberships = memberships / memberships.sum(dim=2, keepdim=True)
+    return memberships
+
+
+def fuzzy_c_means(x, n_clusters, m=2, epsilon=1e-6, max_iter=1000):
     """
     Fuzzy C-Means clustering
 
@@ -174,31 +193,42 @@ def fuzzy_c_means(x, n_clusters, m=2, epsilon=1e-6, max_iter=100):
         membership: tensor (batch_size, num_points, n_clusters)
         centers: tensor (batch_size, num_dims, n_clusters)
     """
-    x = x.squeeze(-1).transpose(2, 1)  # (batch_size, num_points, num_dims)
-    batch_size, n_points, n_dims = x.size()
+    batch_size, num_dims, num_points, _ = x.size()
+    x = x.squeeze(-1).transpose(1, 2)  # Shape: (batch_size, num_points, num_dims)
+
+    # Initialize the membership matrix
+    memberships = initialize_memberships(batch_size, num_points, n_clusters, x.device)
 
     # Initialize cluster centers
-    centers = torch.randn((batch_size, n_dims, n_clusters), device=x.device, dtype=x.dtype)
+    centers = torch.zeros(batch_size, num_dims, n_clusters, device=x.device)
+    prev_memberships = torch.zeros_like(memberships)
 
-    prev_centers = torch.zeros_like(centers)
-    for i in range(max_iter):
-        # Compute memberships
-        dist_to_centers = torch.norm(x.unsqueeze(-1) - centers.unsqueeze(1), dim=2)  # (batch_size, num_points, n_clusters)
-        inv_dist = 1.0 / (dist_to_centers + 1e-10)
-        power = 2 / (m - 1)
-        membership = (inv_dist / inv_dist.sum(dim=-1, keepdim=True).pow(power)).pow(power)  # (batch_size, num_points, n_clusters)
-
+    for iteration in range(max_iter):
         # Update cluster centers
-        weights = membership.pow(m).unsqueeze(2)
-        centers = (weights * x.unsqueeze(-1)).sum(dim=1) / weights.sum(dim=1)
+        for cluster in range(n_clusters):
+            # Calculate the denominator
+            weights = memberships[:, :, cluster] ** m
+            denominator = weights.sum(dim=1, keepdim=True)
+            # Update centers
+            numerator = (weights.unsqueeze(2) * x).sum(dim=1)
+            centers[:, :, cluster] = numerator / denominator
 
-        # Check for convergence
-        if torch.norm(centers - prev_centers) < epsilon:
+        # Update memberships
+        for cluster in range(n_clusters):
+            diff = x - centers[:, :, cluster].unsqueeze(1)
+            dist = torch.norm(diff, p=2, dim=2)  # Euclidean distance
+            memberships[:, :, cluster] = 1.0 / (dist ** (2 / (m - 1)))
+
+        # Normalize the memberships such that each point's memberships across clusters sum to 1
+        memberships_sum = memberships.sum(dim=2, keepdim=True)
+        memberships = memberships / memberships_sum
+
+        # Check convergence: stop if memberships do not change significantly
+        if iteration > 0 and torch.norm(prev_memberships - memberships) < epsilon:
             break
+        prev_memberships = memberships.clone()
 
-        prev_centers = centers.clone()
-
-    return membership, centers
+    return memberships, centers
 
 
 def construct_hyperedges(x, num_clusters, threshold=0.5, m=2):
@@ -225,8 +255,8 @@ def construct_hyperedges(x, num_clusters, threshold=0.5, m=2):
         
         batch_size, num_dims, num_points, _ = x.shape
         
-        # Get centers and memberships using the fuzzy c-means clustering
-        centers, memberships = fuzzy_c_means(x, num_clusters, m)
+        # Get memberships and centers using the fuzzy c-means clustering
+        memberships, centers = fuzzy_c_means(x, num_clusters, m)
         
         # Create hyperedge matrix to represent each hyperedge's points
         # Initialized with -1s for padding
