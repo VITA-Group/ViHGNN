@@ -41,8 +41,8 @@ from timm.scheduler import create_scheduler
 from timm.utils import ApexScaler, NativeScaler
 
 from data.myloader import create_loader
-import pyramid_vig
-import vig
+import pyramid_vihg
+import vihg
 
 try:
     from apex import amp
