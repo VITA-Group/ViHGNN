@@ -112,10 +112,10 @@ class HypergraphConv2d(nn.Module):
 
         # Step 1: Aggregate node features to get hyperedge features
         node_features_for_hyperedges = batched_index_select(x, hyperedge_matrix)
-        aggregated_hyperedge_features, _ = node_features_for_hyperedges.sum(dim=-1, keepdim=True)
+        aggregated_hyperedge_features = node_features_for_hyperedges.sum(dim=-1, keepdim=True)
         aggregated_hyperedge_features = self.nn_node_to_hyperedge(aggregated_hyperedge_features.squeeze(-1)) # (1, 128, 50)
         # Adding the hyperedge center features to the aggregated hyperedge features
-        aggregated_hyperedge_features += (1 + self.eps) * centers[:, :, :-1, :]
+        aggregated_hyperedge_features += (1 + self.eps) * centers[:, :, :-1]
         
         # Step 2: Aggregate hyperedge features to update node features
         hyperedge_features_for_nodes = batched_index_select(aggregated_hyperedge_features.unsqueeze(-1), point_hyperedge_index)
