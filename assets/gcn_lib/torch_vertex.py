@@ -146,9 +146,9 @@ class GraphConv2d(nn.Module):
         else:
             raise NotImplementedError('conv:{} is not supported'.format(conv))
 
-    def forward(self, x, edge_index, y=None, hyperedge_matrix=None, point_hyperedge_index=None, centers=None):
+    def forward(self, x, edge_index=None, y=None, hyperedge_matrix=None, point_hyperedge_index=None, centers=None):
         if isinstance(self.gconv, HypergraphConv2d):
-            return self.gconv(x, edge_index, y, hyperedge_matrix=hyperedge_matrix, point_hyperedge_index=point_hyperedge_index, centers=centers)
+            return self.gconv(x, hyperedge_matrix, point_hyperedge_index, centers)
         else:
             return self.gconv(x, edge_index, y)
 
