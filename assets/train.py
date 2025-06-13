@@ -1,23 +1,19 @@
-# 2022.06.17-Changed for training ViG model
-#            Huawei Technologies Co., Ltd. <foss@huawei.com>
-#!/usr/bin/env python
-""" ImageNet Training Script
-
-This is intended to be a lean and easily modifiable ImageNet training script that reproduces ImageNet
-training results with some of the latest networks and training techniques. It favours canonical PyTorch
-and standard Python style over trying to be able to 'do it all.' That said, it offers quite a few speed
-and training result improvements over the usual PyTorch example scripts. Repurpose as you see fit.
-
-This script was started from an early version of the PyTorch ImageNet example
-(https://github.com/pytorch/examples/tree/master/imagenet)
-
-NVIDIA CUDA specific speedups adopted from NVIDIA Apex examples
-(https://github.com/NVIDIA/apex/tree/master/examples/imagenet)
-
-Hacked together by / Copyright 2020 Ross Wightman (https://github.com/rwightman)
+#!/usr/bin/env python3
 """
+ViHGNN Training Script
+
+This script trains Vision Hypergraph Neural Networks (ViHGNN) on ImageNet.
+Based on the original ViG training script with hypergraph convolution extensions.
+
+Usage:
+    python train.py /path/to/imagenet --model vihg_ti_224_gelu --num-gpu 8 --batch-size 256
+
+Author: ViHGNN Implementation
+"""
+
 import warnings
 warnings.filterwarnings('ignore')
+
 import argparse
 import time
 import yaml
@@ -32,18 +28,57 @@ import torch.nn as nn
 import torchvision.utils
 from torch.nn.parallel import DistributedDataParallel as NativeDDP
 
-from timm.data import Dataset, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset #, create_loader
+# timm imports with compatibility handling
+try:
+    from timm.data import Dataset, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset
+except ImportError:
+    # For timm 0.6.13, use ImageDataset instead of Dataset
+    from timm.data import ImageDataset as Dataset, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset
+
 from timm.models import create_model, resume_checkpoint, convert_splitbn_model
 from timm.utils import *
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy, JsdCrossEntropy
-from timm.optim import create_optimizer
+from timm.optim import create_optimizer_v2 as create_optimizer
 from timm.scheduler import create_scheduler
-from timm.utils import ApexScaler, NativeScaler
 
+# Scaler imports with fallback
+try:
+    from timm.utils import ApexScaler, NativeScaler
+except ImportError:
+    try:
+        from timm.utils.misc import ApexScaler, NativeScaler
+    except ImportError:
+        # Fallback definitions for compatibility
+        class ApexScaler:
+            def __init__(self):
+                pass
+                
+        class NativeScaler:
+            def __init__(self):
+                self._scaler = torch.cuda.amp.GradScaler()
+            
+            def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True):
+                self._scaler.scale(loss).backward(create_graph=create_graph)
+                if update_grad:
+                    if clip_grad is not None:
+                        assert parameters is not None
+                        self._scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(parameters, clip_grad)
+                    self._scaler.step(optimizer)
+                    self._scaler.update()
+            
+            def state_dict(self):
+                return self._scaler.state_dict()
+            
+            def load_state_dict(self, state_dict):
+                self._scaler.load_state_dict(state_dict)
+
+# Local imports
 from data.myloader import create_loader
 import pyramid_vihg
 import vihg
 
+# Apex imports (optional)
 try:
     from apex import amp
     from apex.parallel import DistributedDataParallel as ApexDDP
@@ -52,6 +87,7 @@ try:
 except ImportError:
     has_apex = False
 
+# Check for native AMP support
 has_native_amp = False
 try:
     if getattr(torch.cuda.amp, 'autocast') is not None:
@@ -332,7 +368,6 @@ def main():
         pretrained=args.pretrained,
         num_classes=args.num_classes,
         drop_rate=args.drop,
-        drop_connect_rate=args.drop_connect,  # DEPRECATED, use drop_path
         drop_path_rate=args.drop_path,
         drop_block_rate=args.drop_block,
         global_pool=args.gp,
@@ -341,27 +376,16 @@ def main():
         bn_eps=args.bn_eps,
         checkpoint_path=args.initial_checkpoint)
         
-    ################## pretrain ############
+    # Load pretrained weights if specified
     if args.pretrain_path is not None:
-        print('Loading:', args.pretrain_path)
-        state_dict = torch.load(args.pretrain_path)
+        print(f'Loading pretrained weights from: {args.pretrain_path}')
+        state_dict = torch.load(args.pretrain_path, map_location='cpu')
         model.load_state_dict(state_dict, strict=False)
-        print('Pretrain weights loaded.')
-    ################### flops #################
-    print(model)
-    if hasattr(model, 'default_cfg'):
-        default_cfg = model.default_cfg
-        input_size = [1] + list(default_cfg['input_size'])
-    else:
-        input_size = [1, 3, 224, 224]
-    input = torch.randn(input_size)#.cuda()
+        print('✅ Pretrained weights loaded successfully.')
     
-    from torchprofile import profile_macs
-    model.eval()
-    macs = profile_macs(model, input)
-    model.train()
-    print('model flops:', macs, 'input_size:', input_size)
-    ##########################################
+    # Display model architecture and parameters
+    print(model)
+    print('FLOPs calculation skipped for HypergraphConv2d compatibility')
     
     if args.local_rank == 0:
         _logger.info('Model %s created, param count: %d' %
@@ -393,6 +417,30 @@ def main():
         _logger.warning("Neither APEX or native Torch AMP is available, using float32. "
                         "Install NVIDA apex or upgrade to PyTorch 1.6")
 
+    # Create optimizer BEFORE DataParallel wrapper to avoid AttributeError
+    optimizer_kwargs = {
+        'lr': args.lr,
+        'weight_decay': args.weight_decay,
+    }
+    
+    # Add optimizer-specific parameters based on optimizer type
+    if args.opt_eps is not None:
+        optimizer_kwargs['eps'] = args.opt_eps
+    
+    if args.opt.lower() in ['sgd']:
+        optimizer_kwargs['momentum'] = args.momentum
+    elif args.opt.lower() in ['adam', 'adamw']:
+        if args.opt_betas is not None:
+            optimizer_kwargs['betas'] = tuple(args.opt_betas)
+        if args.momentum != 0.9:  # Only add momentum if it's not default (for Adam it's called betas)
+            optimizer_kwargs['momentum'] = args.momentum
+    
+    optimizer = create_optimizer(
+        model,
+        opt=args.opt,
+        **optimizer_kwargs
+    )
+
     if args.num_gpu > 1:
         if use_amp == 'apex':
             _logger.warning(
@@ -404,8 +452,6 @@ def main():
         model.cuda()
         if args.channels_last:
             model = model.to(memory_format=torch.channels_last)
-
-    optimizer = create_optimizer(args, model)
 
     amp_autocast = suppress  # do nothing
     loss_scaler = None

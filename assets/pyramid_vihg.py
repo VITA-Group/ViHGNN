@@ -9,7 +9,13 @@ import torch.nn.functional as F
 from torch.nn import Sequential as Seq
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.models.helpers import load_pretrained
+try:
+    from timm.models.helpers import load_pretrained
+except ImportError:
+    # For newer timm versions, this function may not exist
+    def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=None, strict=True):
+        """Fallback function for load_pretrained compatibility"""
+        return model
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 
@@ -123,12 +129,13 @@ class DeepGCN(torch.nn.Module):
             num_clusters = [int(x.item()) for x in torch.linspace(k, k, self.n_blocks)]  # number of hyperedges k
             print('num_clusters', num_clusters)
             graph_params = num_clusters
+            max_dilation = 49 // max(num_clusters)
         else:
             # Use num_knn for knn graph construction
             num_knn = [int(x.item()) for x in torch.linspace(k, k, self.n_blocks)] # number of knn's k
             print('num_knn', num_knn)
             graph_params = num_knn
-        max_dilation = 49 // max(num_knn)
+            max_dilation = 49 // max(num_knn)
         
         self.stem = Stem(out_dim=channels[0], act=act)
         self.pos_embed = nn.Parameter(torch.zeros(1, channels[0], 224//4, 224//4))

@@ -99,32 +99,37 @@ class HypergraphConv2d(nn.Module):
         self.eps = nn.Parameter(torch.Tensor([eps_init]))
 
     def forward(self, x, hyperedge_matrix, point_hyperedge_index, centers):
-        with torch.no_grad():
-            # Check and append dummy node to x if not present
-            if not torch.equal(x[:, :, -1, :], torch.zeros((x.size(0), x.size(1), 1, x.size(3)), device=x.device)): # 假设 n_dims = 128, n_points = 3136, hyperedge_num = 50
-                dummy_node = torch.zeros((x.size(0), x.size(1), 1, x.size(3)), device=x.device)
-                x = torch.cat([x, dummy_node], dim=2) # (1, 128, 3137, 1)
-            
-            # Check and append dummy hyperedge to centers if not present
-            if not torch.equal(centers[:, :, -1], torch.zeros((centers.size(0), centers.size(1), 1), device=centers.device)):
-                dummy_hyperedge = torch.zeros((centers.size(0), centers.size(1), 1), device=centers.device)
-                centers = torch.cat([centers, dummy_hyperedge], dim=2) # centers: (1, 128, 51)
-
-        # Step 1: Aggregate node features to get hyperedge features
-        node_features_for_hyperedges = batched_index_select(x, hyperedge_matrix)
-        aggregated_hyperedge_features = node_features_for_hyperedges.sum(dim=-1, keepdim=True)
-        aggregated_hyperedge_features = self.nn_node_to_hyperedge(aggregated_hyperedge_features.squeeze(-1)) # (1, 128, 50)
-        # Adding the hyperedge center features to the aggregated hyperedge features
-        aggregated_hyperedge_features += (1 + self.eps) * centers[:, :, :-1]
+        batch_size, num_channels, height, width = x.size()
+        num_nodes = height * width
         
-        # Step 2: Aggregate hyperedge features to update node features
-        hyperedge_features_for_nodes = batched_index_select(aggregated_hyperedge_features.unsqueeze(-1), point_hyperedge_index)
-        aggregated_node_features_from_hyperedges = self.nn_hyperedge_to_node(hyperedge_features_for_nodes.sum(dim=-1, keepdim=True).squeeze(-1))
-
-        # Update original node features
-        out = aggregated_node_features_from_hyperedges
-
-        return out
+        # Reshape input for processing
+        x = x.reshape(batch_size, num_channels, num_nodes, 1)  # (B, C, H*W, 1)
+        
+        # Node to hyperedge message passing
+        hyperedge_matrix_t = hyperedge_matrix.transpose(1, 2)  # (B, max_nodes_per_edge, num_hyperedges)
+        hyperedge_features = batched_index_select(x, hyperedge_matrix_t)  # (B, C, max_nodes_per_edge, num_hyperedges)
+        hyperedge_features = torch.mean(hyperedge_features, dim=2, keepdim=True)  # (B, C, 1, num_hyperedges)
+        hyperedge_features = hyperedge_features.transpose(2, 3)  # (B, C, num_hyperedges, 1)
+        
+        # Process hyperedge features
+        hyperedge_features = self.nn_node_to_hyperedge(hyperedge_features)  # (B, C, num_hyperedges, 1)
+        
+        # Hyperedge to node message passing
+        # hyperedge_features: (B, C, num_hyperedges, 1)
+        # point_hyperedge_index: (B, num_nodes, max_edges_per_node)
+        node_features = batched_index_select(hyperedge_features, point_hyperedge_index)  # (B, C, num_nodes, max_edges_per_node)
+        node_features = torch.mean(node_features, dim=-1, keepdim=True)  # (B, C, num_nodes, 1)
+        
+        # Add residual connection like GIN
+        node_features = (1 + self.eps) * x + node_features
+        
+        # Process node features
+        output = self.nn_hyperedge_to_node(node_features)  # (B, out_channels, num_nodes, 1)
+        
+        # Reshape back to spatial dimensions
+        output = output.reshape(batch_size, -1, height, width)  # (B, out_channels, H, W)
+        
+        return output
 
 
 class GraphConv2d(nn.Module):

@@ -1,0 +1,36 @@
+name: vig
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python
+  - python=3.8
+
+  # Core ML libraries
+  - pytorch=2.4.1
+  - torchvision=0.19.1
+  - torchaudio=2.4.1
+  - pytorch-cuda=11.8
+
+  # Essential packages
+  - numpy
+  - scipy
+  - scikit-learn
+  - pillow
+  - matplotlib
+  - pyyaml
+
+  # Development tools
+  - jupyter
+  - ipython
+
+  # Pip dependencies
+  - pip
+  - pip:
+    - timm==0.6.13
+    - opencv-python
+    - tensorboard
+    - tqdm 

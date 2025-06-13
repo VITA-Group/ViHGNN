@@ -178,7 +178,7 @@ def initialize_memberships(batch_size, n_points, n_clusters, device):
     return memberships
 
 
-def fuzzy_c_means(x, n_clusters, m=2, epsilon=1e-6, max_iter=1000):
+def fuzzy_c_means(x, n_clusters, m=2, epsilon=1e-3, max_iter=20):
     """
     Fuzzy C-Means clustering
 
@@ -231,7 +231,7 @@ def fuzzy_c_means(x, n_clusters, m=2, epsilon=1e-6, max_iter=1000):
     return memberships, centers
 
 
-def construct_hyperedges(x, num_clusters, threshold=0.5, m=2):
+def construct_hyperedges(x, num_clusters, threshold=0.01, m=2):
     """
     Constructs hyperedges based on fuzzy c-means clustering.
 
@@ -258,6 +258,20 @@ def construct_hyperedges(x, num_clusters, threshold=0.5, m=2):
         # Get memberships and centers using the fuzzy c-means clustering
         memberships, centers = fuzzy_c_means(x, num_clusters, m)
         
+        # If fuzzy c-means doesn't converge well (all memberships are similar),
+        # use the top-k approach instead
+        max_membership = memberships.max().item()
+        if max_membership < 0.1:  # If no clear clustering
+            # Assign each point to its most likely cluster
+            _, top_clusters = torch.topk(memberships, k=1, dim=2)
+            # Create binary assignments
+            binary_memberships = torch.zeros_like(memberships)
+            for b in range(batch_size):
+                for p in range(num_points):
+                    binary_memberships[b, p, top_clusters[b, p, 0]] = 1.0
+            memberships = binary_memberships
+            threshold = 0.5  # Use higher threshold for binary assignments
+        
         # Create hyperedge matrix to represent each hyperedge's points
         # Initialized with -1s for padding
         device = x.device
@@ -276,6 +290,9 @@ def construct_hyperedges(x, num_clusters, threshold=0.5, m=2):
         # Create point to hyperedge index to indicate which hyperedges each point belongs to
         # Initialized with -1s for padding
         max_edges_per_point = (memberships > threshold).sum(dim=-1).max().item()
+        if max_edges_per_point == 0:
+            max_edges_per_point = 1  # Ensure at least one edge per point
+        
         point_hyperedge_index = -torch.ones(
             batch_size,
             num_points,
@@ -286,7 +303,12 @@ def construct_hyperedges(x, num_clusters, threshold=0.5, m=2):
         for b in range(batch_size):
             for p in range(num_points):
                 idxs = torch.where(memberships[b, p, :] > threshold)[0]
-                point_hyperedge_index[b, p, :len(idxs)] = idxs
+                if len(idxs) > 0:
+                    point_hyperedge_index[b, p, :len(idxs)] = idxs
+                else:
+                    # If no assignment, assign to the most likely cluster
+                    best_cluster = torch.argmax(memberships[b, p, :])
+                    point_hyperedge_index[b, p, 0] = best_cluster
     
     # Return the three constructed tensors
     return hyperedge_matrix, point_hyperedge_index, centers
