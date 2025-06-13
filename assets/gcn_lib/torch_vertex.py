@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 from .torch_nn import BasicConv, batched_index_select, act_layer
-from .torch_edge import DenseDilatedKnnGraph, construct_hyperedges
+from .torch_edge import DenseDilatedKnnGraph, construct_hyperedges_optimized
 from .pos_embed import get_2d_relative_pos_embed
 import torch.nn.functional as F
 from timm.models.layers import DropPath
@@ -185,7 +185,7 @@ class DyGraphConv2d(GraphConv2d):
         
         # Construct graph using either hypergraph or dilated knn graph based on use_hypergraph flag
         if self.use_hypergraph:
-            hyperedge_matrix, point_hyperedge_index, centers = construct_hyperedges(x, num_clusters=self.k)
+            hyperedge_matrix, point_hyperedge_index, centers = construct_hyperedges_optimized(x, num_clusters=self.k, use_ultra_fast=True)
             x = super(DyGraphConv2d, self).forward(x, hyperedge_matrix=hyperedge_matrix, point_hyperedge_index=point_hyperedge_index, centers=centers, y=y)
         else:
             edge_index = self.graph_constructor(x, y, relative_pos)

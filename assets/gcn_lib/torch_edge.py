@@ -178,10 +178,10 @@ def initialize_memberships(batch_size, n_points, n_clusters, device):
     return memberships
 
 
-def fuzzy_c_means(x, n_clusters, m=2, epsilon=1e-3, max_iter=20):
+def fuzzy_c_means_gpu_optimized(x, n_clusters, m=2, epsilon=1e-3, max_iter=20):
     """
-    Fuzzy C-Means clustering
-
+    GPU-optimized Fuzzy C-Means clustering with vectorized operations
+    
     Args:
         x: tensor (batch_size, num_dims, num_points, 1)
         n_clusters: int, the number of clusters
@@ -195,120 +195,247 @@ def fuzzy_c_means(x, n_clusters, m=2, epsilon=1e-3, max_iter=20):
     """
     batch_size, num_dims, num_points, _ = x.size()
     x = x.squeeze(-1).transpose(1, 2)  # Shape: (batch_size, num_points, num_dims)
+    device = x.device
 
     # Initialize the membership matrix
-    memberships = initialize_memberships(batch_size, num_points, n_clusters, x.device)
-
-    # Initialize cluster centers
-    centers = torch.zeros(batch_size, num_dims, n_clusters, device=x.device)
+    memberships = initialize_memberships(batch_size, num_points, n_clusters, device)
+    
+    # Pre-compute power for efficiency
+    m_inv = 1.0 / (m - 1)
+    two_over_m_minus_1 = 2.0 / (m - 1)
+    
     prev_memberships = torch.zeros_like(memberships)
 
     for iteration in range(max_iter):
-        # Update cluster centers
-        for cluster in range(n_clusters):
-            # Calculate the denominator
-            weights = memberships[:, :, cluster] ** m
-            denominator = weights.sum(dim=1, keepdim=True)
-            # Update centers
-            numerator = (weights.unsqueeze(2) * x).sum(dim=1)
-            centers[:, :, cluster] = numerator / denominator
-
-        # Update memberships
-        for cluster in range(n_clusters):
-            diff = x - centers[:, :, cluster].unsqueeze(1)
-            dist = torch.norm(diff, p=2, dim=2)  # Euclidean distance
-            memberships[:, :, cluster] = 1.0 / (dist ** (2 / (m - 1)))
-
-        # Normalize the memberships such that each point's memberships across clusters sum to 1
+        # Vectorized cluster center update
+        # memberships: (batch_size, num_points, n_clusters)
+        # x: (batch_size, num_points, num_dims)
+        weights = memberships ** m  # (batch_size, num_points, n_clusters)
+        
+        # Calculate centers using einsum for efficiency
+        numerator = torch.einsum('bpc,bpd->bcd', weights, x)  # (batch_size, n_clusters, num_dims)
+        denominator = weights.sum(dim=1, keepdim=True).transpose(1, 2)  # (batch_size, n_clusters, 1)
+        centers = (numerator / denominator).transpose(1, 2)  # (batch_size, num_dims, n_clusters)
+        
+        # Vectorized membership update
+        # Compute all pairwise distances at once
+        # x: (batch_size, num_points, num_dims) -> (batch_size, num_points, 1, num_dims)
+        # centers: (batch_size, num_dims, n_clusters) -> (batch_size, 1, n_clusters, num_dims)
+        x_expanded = x.unsqueeze(2)  # (batch_size, num_points, 1, num_dims)
+        centers_expanded = centers.transpose(1, 2).unsqueeze(1)  # (batch_size, 1, n_clusters, num_dims)
+        
+        # Compute squared Euclidean distances efficiently
+        diff = x_expanded - centers_expanded  # (batch_size, num_points, n_clusters, num_dims)
+        distances_sq = (diff ** 2).sum(dim=-1)  # (batch_size, num_points, n_clusters)
+        
+        # Avoid division by zero
+        distances_sq = torch.clamp(distances_sq, min=1e-10)
+        
+        # Compute membership using vectorized operations
+        distances_powered = distances_sq ** m_inv  # (batch_size, num_points, n_clusters)
+        
+        # For each point and cluster, compute 1 / sum of (d_ik / d_ij)^(2/(m-1))
+        # distances_powered: (batch_size, num_points, n_clusters)
+        ratio_matrix = distances_powered.unsqueeze(3) / distances_powered.unsqueeze(2)  # (batch_size, num_points, n_clusters, n_clusters)
+        denominator_memberships = ratio_matrix.sum(dim=3)  # (batch_size, num_points, n_clusters)
+        
+        memberships = 1.0 / denominator_memberships
+        
+        # Handle numerical issues
+        memberships = torch.nan_to_num(memberships, nan=1.0/n_clusters, posinf=1.0, neginf=0.0)
+        
+        # Normalize memberships to ensure they sum to 1 for each point
         memberships_sum = memberships.sum(dim=2, keepdim=True)
-        memberships = memberships / memberships_sum
+        memberships = memberships / torch.clamp(memberships_sum, min=1e-10)
 
-        # Check convergence: stop if memberships do not change significantly
-        if iteration > 0 and torch.norm(prev_memberships - memberships) < epsilon:
-            break
+        # Check convergence using L2 norm
+        if iteration > 0:
+            diff_norm = torch.norm(prev_memberships - memberships)
+            if diff_norm < epsilon:
+                break
         prev_memberships = memberships.clone()
 
     return memberships, centers
 
 
-def construct_hyperedges(x, num_clusters, threshold=0.01, m=2):
+def fuzzy_c_means_ultra_fast(x, n_clusters, m=2, epsilon=1e-3, max_iter=15):
     """
-    Constructs hyperedges based on fuzzy c-means clustering.
+    Ultra-fast GPU-optimized Fuzzy C-Means with further optimizations
+    
+    Args:
+        x: tensor (batch_size, num_dims, num_points, 1)
+        n_clusters: int, the number of clusters
+        m: float, fuzziness parameter
+        epsilon: float, threshold for stopping criterion
+        max_iter: int, maximum number of iterations
+
+    Returns:
+        membership: tensor (batch_size, num_points, n_clusters)
+        centers: tensor (batch_size, num_dims, n_clusters)
+    """
+    batch_size, num_dims, num_points, _ = x.size()
+    x = x.squeeze(-1).transpose(1, 2)  # Shape: (batch_size, num_points, num_dims)
+    device = x.device
+
+    # Initialize centers randomly for better speed
+    random_indices = torch.randint(0, num_points, (batch_size, n_clusters), device=device)
+    centers = torch.zeros(batch_size, num_dims, n_clusters, device=device)
+    for b in range(batch_size):
+        centers[b, :, :] = x[b, random_indices[b], :].t()
+    
+    # Pre-compute constants
+    m_inv = 1.0 / (m - 1)
+    two_over_m_minus_1 = 2.0 / (m - 1)
+    
+    # Use mixed precision for speed (if available)
+    use_mixed_precision = torch.cuda.is_available() and hasattr(torch.cuda, 'amp')
+    
+    if use_mixed_precision:
+        scaler = torch.cuda.amp.GradScaler()
+        with torch.cuda.amp.autocast():
+            return _fuzzy_c_means_core(x, centers, n_clusters, m, m_inv, epsilon, max_iter)
+    else:
+        return _fuzzy_c_means_core(x, centers, n_clusters, m, m_inv, epsilon, max_iter)
+
+
+def _fuzzy_c_means_core(x, centers, n_clusters, m, m_inv, epsilon, max_iter):
+    """Core FCM computation with optimized tensor operations"""
+    batch_size, num_points, num_dims = x.shape
+    device = x.device
+    
+    # Initialize memberships
+    memberships = torch.rand(batch_size, num_points, n_clusters, device=device)
+    memberships = memberships / memberships.sum(dim=2, keepdim=True)
+    
+    prev_memberships = torch.zeros_like(memberships)
+    
+    for iteration in range(max_iter):
+        # Update centers using optimized einsum
+        weights = memberships ** m
+        numerator = torch.einsum('bpc,bpd->bcd', weights, x)  # (batch_size, n_clusters, num_dims)
+        denominator = weights.sum(dim=1, keepdim=True).transpose(1, 2)  # (batch_size, n_clusters, 1)
+        centers = (numerator / denominator).transpose(1, 2)  # (batch_size, num_dims, n_clusters)
+        
+        # Compute distances using batch matrix multiplication for speed
+        # x: (batch_size, num_points, num_dims)
+        # centers: (batch_size, num_dims, n_clusters)
+        x_norm_sq = (x ** 2).sum(dim=2, keepdim=True)  # (batch_size, num_points, 1)
+        centers_norm_sq = (centers ** 2).sum(dim=1, keepdim=True)  # (batch_size, 1, n_clusters)
+        cross_term = torch.bmm(x, centers)  # (batch_size, num_points, n_clusters)
+        
+        distances_sq = x_norm_sq + centers_norm_sq - 2 * cross_term
+        distances_sq = torch.clamp(distances_sq, min=1e-10)
+        
+        # Efficient membership update
+        distances_powered = distances_sq ** (-m_inv)
+        memberships = distances_powered / distances_powered.sum(dim=2, keepdim=True)
+        
+        # Handle edge cases
+        memberships = torch.nan_to_num(memberships, nan=1.0/n_clusters)
+        
+        # Early stopping check
+        if iteration > 0 and torch.norm(prev_memberships - memberships) < epsilon:
+            break
+        prev_memberships = memberships.clone()
+    
+    return memberships, centers
+
+
+# Keep original function for backward compatibility
+fuzzy_c_means = fuzzy_c_means_gpu_optimized
+
+
+def construct_hyperedges_optimized(x, num_clusters, threshold=0.01, m=2, use_ultra_fast=True):
+    """
+    GPU-optimized hyperedge construction with vectorized operations.
 
     Args:
         x (torch.Tensor): Input point cloud data with shape (batch_size, num_dims, num_points, 1).
         num_clusters (int): Number of clusters (hyperedges).
         threshold (float): Threshold value for memberships to consider a point belonging to a cluster.
         m (float): Fuzzifier for fuzzy c-means clustering.
+        use_ultra_fast (bool): Whether to use the ultra-fast implementation.
 
     Returns:
         hyperedge_matrix (torch.Tensor): Tensor of shape (batch_size, n_clusters, num_points_index).
-            Represents each cluster's points. Padded with -1 for unequal cluster sizes.
         point_hyperedge_index (torch.Tensor): Tensor of shape (batch_size, num_points, cluster_index).
-            Indicates the clusters each point belongs to. Padded with -1 for points belonging to different numbers of clusters.
         hyperedge_features (torch.Tensor): Tensor of shape (batch_size, num_dims, n_clusters).
-            The center of each cluster, serving as the feature for each hyperedge.
     """
     
     with torch.no_grad():
-        x = x.detach()  # Detach x from the computation graph
-        
+        x = x.detach()
         batch_size, num_dims, num_points, _ = x.shape
-        
-        # Get memberships and centers using the fuzzy c-means clustering
-        memberships, centers = fuzzy_c_means(x, num_clusters, m)
-        
-        # If fuzzy c-means doesn't converge well (all memberships are similar),
-        # use the top-k approach instead
-        max_membership = memberships.max().item()
-        if max_membership < 0.1:  # If no clear clustering
-            # Assign each point to its most likely cluster
-            _, top_clusters = torch.topk(memberships, k=1, dim=2)
-            # Create binary assignments
-            binary_memberships = torch.zeros_like(memberships)
-            for b in range(batch_size):
-                for p in range(num_points):
-                    binary_memberships[b, p, top_clusters[b, p, 0]] = 1.0
-            memberships = binary_memberships
-            threshold = 0.5  # Use higher threshold for binary assignments
-        
-        # Create hyperedge matrix to represent each hyperedge's points
-        # Initialized with -1s for padding
         device = x.device
+        
+        # Choose FCM implementation
+        if use_ultra_fast:
+            memberships, centers = fuzzy_c_means_ultra_fast(x, num_clusters, m)
+        else:
+            memberships, centers = fuzzy_c_means_gpu_optimized(x, num_clusters, m)
+        
+        # Vectorized threshold application
+        membership_mask = memberships > threshold  # (batch_size, num_points, n_clusters)
+        
+        # Handle case where no clear clustering emerges
+        max_membership = memberships.max(dim=2, keepdim=True)[0]
+        weak_clustering_mask = max_membership < 0.1
+        
+        if weak_clustering_mask.any():
+            # For weak clustering, assign each point to its best cluster
+            best_clusters = memberships.argmax(dim=2)  # (batch_size, num_points)
+            binary_memberships = torch.zeros_like(memberships)
+            batch_indices = torch.arange(batch_size, device=device)[:, None]
+            point_indices = torch.arange(num_points, device=device)[None, :]
+            binary_memberships[batch_indices, point_indices, best_clusters] = 1.0
+            
+            # Apply only where clustering is weak
+            memberships = torch.where(weak_clustering_mask, binary_memberships, memberships)
+            membership_mask = memberships > 0.5
+        
+        # Efficient hyperedge matrix construction
+        # Count points per hyperedge
+        points_per_edge = membership_mask.sum(dim=1)  # (batch_size, n_clusters)
+        max_points_per_edge = points_per_edge.max().item()
+        
+        if max_points_per_edge == 0:
+            max_points_per_edge = 1
+        
         hyperedge_matrix = -torch.ones(
-            batch_size,
-            num_clusters,
-            num_points,
-            dtype=torch.long,
-            device=device,
+            batch_size, num_clusters, max_points_per_edge,
+            dtype=torch.long, device=device
         )
+        
+        # Vectorized assignment using advanced indexing
         for b in range(batch_size):
             for c in range(num_clusters):
-                idxs = torch.where(memberships[b, :, c] > threshold)[0]
-                hyperedge_matrix[b, c, :len(idxs)] = idxs
+                point_indices = torch.where(membership_mask[b, :, c])[0]
+                if len(point_indices) > 0:
+                    hyperedge_matrix[b, c, :len(point_indices)] = point_indices
         
-        # Create point to hyperedge index to indicate which hyperedges each point belongs to
-        # Initialized with -1s for padding
-        max_edges_per_point = (memberships > threshold).sum(dim=-1).max().item()
+        # Efficient point to hyperedge index construction
+        edges_per_point = membership_mask.sum(dim=2)  # (batch_size, num_points)
+        max_edges_per_point = edges_per_point.max().item()
+        
         if max_edges_per_point == 0:
-            max_edges_per_point = 1  # Ensure at least one edge per point
+            max_edges_per_point = 1
         
         point_hyperedge_index = -torch.ones(
-            batch_size,
-            num_points,
-            max_edges_per_point,
-            dtype=torch.long,
-            device=device,
+            batch_size, num_points, max_edges_per_point,
+            dtype=torch.long, device=device
         )
+        
         for b in range(batch_size):
             for p in range(num_points):
-                idxs = torch.where(memberships[b, p, :] > threshold)[0]
-                if len(idxs) > 0:
-                    point_hyperedge_index[b, p, :len(idxs)] = idxs
+                edge_indices = torch.where(membership_mask[b, p, :])[0]
+                if len(edge_indices) > 0:
+                    point_hyperedge_index[b, p, :len(edge_indices)] = edge_indices
                 else:
-                    # If no assignment, assign to the most likely cluster
-                    best_cluster = torch.argmax(memberships[b, p, :])
+                    # Assign to best cluster if no assignment
+                    best_cluster = memberships[b, p, :].argmax()
                     point_hyperedge_index[b, p, 0] = best_cluster
     
-    # Return the three constructed tensors
     return hyperedge_matrix, point_hyperedge_index, centers
+
+
+# Update the main function to use optimized version
+construct_hyperedges = construct_hyperedges_optimized
